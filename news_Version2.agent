@@ -1,0 +1,108 @@
+"""Täglicher US-Handelspolitik-Digest per E-Mail.
+
+Ablauf: Federal Register (offizielle Dokumente) + Claude mit Websuche
+-> deutsche Zusammenfassung -> E-Mail um 7:00 Uhr Washingtoner Zeit.
+"""
+import os
+import smtplib
+import sys
+import datetime as dt
+from email.message import EmailMessage
+from zoneinfo import ZoneInfo
+
+import anthropic
+import requests
+
+TZ = ZoneInfo("America/New_York")
+SEND_HOUR = 7
+RECIPIENT = "maik@boeres.de"
+MODEL = "claude-sonnet-4-20250514"
+
+FR_URL = "https://www.federalregister.gov/api/v1/documents.json"
+AGENCIES = [
+    "trade-representative-office-of-united-states",
+    "industry-and-security-bureau",
+    "international-trade-administration",
+    "foreign-assets-control-office",
+]
+
+
+def should_run(now: dt.datetime) -> bool:
+    """GitHub Actions läuft in UTC; wegen Sommer-/Winterzeit starten wir
+    zweimal und senden nur, wenn es in Washington gerade 7 Uhr ist."""
+    return bool(os.getenv("FORCE")) or now.hour == SEND_HOUR
+
+
+def fetch_federal_register(since: dt.date) -> str:
+    params = {
+        "conditions[agencies][]": AGENCIES,
+        "conditions[publication_date][gte]": since.isoformat(),
+        "order": "newest",
+        "per_page": 30,
+        "fields[]": ["title", "abstract", "html_url", "agencies", "publication_date", "type"],
+    }
+    r = requests.get(FR_URL, params=params, timeout=30)
+    r.raise_for_status()
+    lines = []
+    for d in r.json().get("results", []):
+        agencies = ", ".join(a.get("name", "") for a in d.get("agencies", []))
+        lines.append(
+            f"- [{d['publication_date']}] {d['title']} ({d['type']}, {agencies})\n"
+            f"  {(d.get('abstract') or '')[:400]}\n  {d['html_url']}"
+        )
+    return "\n".join(lines) or "(keine neuen Dokumente)"
+
+
+def summarize(fr_docs: str, today: dt.date) -> str:
+    client = anthropic.Anthropic()
+    prompt = f"""Heute ist {today:%d.%m.%Y}. Erstelle einen Morgen-Digest zur US-Handelspolitik auf Deutsch.
+
+Quellen:
+1) Offizielle Dokumente der letzten 2 Tage (Federal Register):
+{fr_docs}
+
+2) Suche zusätzlich im Web nach den wichtigsten Nachrichten der letzten 24 Stunden zu:
+Zölle, Sanktionen (OFAC), Exportkontrollen (BIS), Handelsabkommen, Handelsstreit mit China/EU/Deutschland.
+
+Format:
+- Oben: 2-3 Sätze "Das Wichtigste heute"
+- Dann max. 6 Punkte, je 1-2 Sätze, mit Quelle und Link
+- Markiere echte Neuigkeiten gegenüber Bekanntem
+- Zum Schluss: "Heute zu beobachten" (1-3 Punkte) Nichts erfinden: Wenn es wenig Neues gibt, sag das klar."""
+    msg = client.messages.create(
+        model=MODEL,
+        max_tokens=2500,
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return "\n".join(b.text for b in msg.content if b.type == "text").strip()
+
+
+def send_email(subject: str, body: str) -> None:
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = os.environ["SMTP_USER"]
+    msg["To"] = RECIPIENT
+    msg.set_content(body)
+    host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    with smtplib.SMTP_SSL(host, 465) as s:
+        s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
+        s.send_message(msg)
+
+
+def main() -> None:
+    now = dt.datetime.now(TZ)
+    if not should_run(now):
+        print(f"Washington {now:%H:%M}: nicht {SEND_HOUR} Uhr, überspringe.")
+        sys.exit(0)
+    docs = fetch_federal_register(now.date() - dt.timedelta(days=2))
+    digest = summarize(docs, now.date())
+    if os.getenv("DRY_RUN"):
+        print(digest)
+        return
+    send_email(f"US-Handelspolitik – {now:%d.%m.%Y}", digest)
+    print("Digest gesendet.")
+
+
+if __name__ == "__main__":
+    main()
