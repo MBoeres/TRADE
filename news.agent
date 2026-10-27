@@ -1,0 +1,13 @@
+"""Compatibility wrapper for the active script used by the daily workflow.
+
+The GitHub Action invokes `python news_agent.py`, which in turn expects a
+real script named `news.agent`. The repository currently stores the implementation
+in `news_Version2.agent`, so we redirect to that file here.
+"""
+
+from pathlib import Path
+import runpy
+
+
+if __name__ == "__main__":
+    runpy.run_path(str(Path(__file__).with_name("news_Version2.agent")), run_name="__main__")
