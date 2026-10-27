@@ -1,13 +1,35 @@
-"""Compatibility wrapper for the active script used by the daily workflow.
+"""Compatibility wrapper for the actual script used by the daily workflow.
 
-The GitHub Action invokes `python news_agent.py`, which in turn expects a
-real script named `news.agent`. The repository currently stores the implementation
-in `news_Version2.agent`, so we redirect to that file here.
+Older references point to `news.agent`, but the implementation currently lives in
+`news_Version2.agent`. We resolve that script here and do a quick secret check
+before execution.
 """
 
+from __future__ import annotations
+
+import os
 from pathlib import Path
 import runpy
 
 
+def resolve_script() -> Path:
+    script = Path(__file__).with_name("news_Version2.agent")
+    if not script.exists():
+        raise FileNotFoundError(f"Missing script: {script}")
+    return script
+
+
+def validate_environment() -> None:
+    missing = [
+        key for key in ("ANTHROPIC_API_KEY", "SMTP_USER", "SMTP_PASSWORD")
+        if not os.getenv(key)
+    ]
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+
+
 if __name__ == "__main__":
-    runpy.run_path(str(Path(__file__).with_name("news_Version2.agent")), run_name="__main__")
+    validate_environment()
+    script = resolve_script()
+    print(f"Running {script.name}")
+    runpy.run_path(str(script), run_name="__main__")
